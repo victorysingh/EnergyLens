@@ -1,0 +1,284 @@
+# =============================================================================
+# config.yaml: every setting and every ASSUMPTION used by the pipeline.
+#
+# Nothing that changes a number is hard-coded in src/. Every entry under
+# `assumptions:` becomes one row of data/processed/assumptions.csv (and the
+# Power BI assumptions panel), so the reader can see exactly what was assumed.
+#
+# Each entry has:
+#   value     the setting itself
+#   unit      unit of the value
+#   label     ASSUMPTION  = a judgement or external figure that a real project
+#                            would replace with site-specific data
+#             METHOD      = a processing threshold / modelling choice
+#   source    where the value comes from, or why it was chosen
+#   used_by   which script(s) read it
+# =============================================================================
+
+project:
+  random_seed: 42            # fixed so Isolation Forest is deterministic
+
+# -----------------------------------------------------------------------------
+# Data source: Building Data Genome Project 2 (public, open data)
+# -----------------------------------------------------------------------------
+source:
+  repo: https://github.com/buds-lab/building-data-genome-project-2
+  # The CSVs in the repo are stored with Git LFS. raw.githubusercontent.com
+  # returns a small "pointer" file holding the SHA-256 and size; the real file
+  # comes from media.githubusercontent.com.
+  pointer_base: https://raw.githubusercontent.com/buds-lab/building-data-genome-project-2/master/
+  media_base: https://media.githubusercontent.com/media/buds-lab/building-data-genome-project-2/master/
+  files:
+    - data/metadata/metadata.csv
+    - data/meters/raw/electricity.csv   # RAW (not BDG2's pre-cleaned file) so our own validation does real work
+    - data/weather/weather.csv
+
+assumptions:
+  # ---------------- building selection ----------------
+  analysis_year:
+    value: auto
+    unit: calendar year
+    label: METHOD
+    source: "'auto' = the year in which the median Retail building has the highest share of valid hourly readings (computed in 02_validate_clean.py)"
+    used_by: 02_validate_clean
+  primary_building_types:
+    value: [Retail]
+    unit: BDG2 primaryspaceusage
+    label: METHOD
+    source: Brief asks for retail-like buildings first
+    used_by: 02_validate_clean
+  fill_building_types:
+    value: [Office]
+    unit: BDG2 primaryspaceusage
+    label: METHOD
+    source: BDG2 has only 12 Retail buildings (11 with an electricity meter), below the 15-building minimum, so offices are added as the closest commercial type
+    used_by: 02_validate_clean
+  fill_buildings_per_site:
+    value: 4
+    unit: buildings per site
+    label: METHOD
+    source: Offices are drawn only from sites that also have Retail buildings (shared weather/climate), sampled at random (fixed seed) from those that pass validation, to keep sites balanced and avoid hand-picking
+    used_by: 02_validate_clean
+  min_buildings:
+    value: 15
+    unit: buildings
+    label: METHOD
+    source: Brief section 3.2 (15 to 30 buildings)
+    used_by: 02_validate_clean
+  max_buildings:
+    value: 30
+    unit: buildings
+    label: METHOD
+    source: Brief section 3.2 (15 to 30 buildings)
+    used_by: 02_validate_clean
+
+  # ---------------- validation & cleaning ----------------
+  treat_zero_as_missing:
+    value: true
+    unit: boolean
+    label: METHOD
+    source: A whole-building electricity meter should never read exactly 0 kWh; BDG2's own cleaning treats zero electricity readings as invalid (BDG2 wiki, Meters data features)
+    used_by: 02_validate_clean
+  spike_multiple_of_p99:
+    value: 3.0
+    unit: x building's 99th percentile
+    label: METHOD
+    source: A reading above 3x the building's own 99th-percentile hourly load is treated as physically implausible (meter glitch). Judgement-based threshold
+    used_by: 02_validate_clean
+  flatline_min_hours:
+    value: 24
+    unit: hours
+    label: METHOD
+    source: The exact same non-zero reading for 24+ hours in a row suggests a stuck meter or a copied-forward value; BDG2 uses the same 24-hour rule for zero runs
+    used_by: 02_validate_clean
+  max_fill_gap_hours:
+    value: 3
+    unit: hours
+    label: METHOD
+    source: Gaps of up to 3 consecutive hours are linearly interpolated (and flagged); longer gaps are excluded because a straight line cannot reproduce the daily load shape
+    used_by: 02_validate_clean
+  min_pct_valid:
+    value: 95.0
+    unit: percent of hours
+    label: METHOD
+    source: A building needs at least 95% valid hourly readings in the analysis year to pass (keeps annualisation adjustments small)
+    used_by: 02_validate_clean
+  max_pct_filled:
+    value: 2.0
+    unit: percent of hours
+    label: METHOD
+    source: A building fails if more than 2% of its hours had to be interpolated
+    used_by: 02_validate_clean
+  eui_plausible_min:
+    value: 25
+    unit: kWh/m2/yr
+    label: ASSUMPTION
+    source: Sanity window, judgement-based. Below ~25 kWh/m2/yr of electricity the meter probably covers only part of the building (e.g. a sub-meter) or the floor area is wrong
+    used_by: 02_validate_clean
+  eui_plausible_max:
+    value: 1000
+    unit: kWh/m2/yr
+    label: ASSUMPTION
+    source: Sanity window, judgement-based. Above ~1000 kWh/m2/yr for retail/office electricity the floor area is probably wrong or the meter serves more than this building
+    used_by: 02_validate_clean
+  area_tolerance_m2:
+    value: 1.0
+    unit: m2
+    label: METHOD
+    source: Metadata gives both sqm and sqft; they must agree within 1 m2 after converting sqft x 0.09290304
+    used_by: 02_validate_clean
+  weather_max_fill_gap_hours:
+    value: 6
+    unit: hours
+    label: METHOD
+    source: Outdoor temperature changes slowly, so weather gaps up to 6 h are interpolated (and flagged)
+    used_by: 02_validate_clean
+
+  # ---------------- KPIs ----------------
+  baseload_percentile:
+    value: 5
+    unit: percentile of a day's hourly load
+    label: METHOD
+    source: Baseload = 5th percentile of each day's 24 hourly readings, averaged over days (robust to a single odd hour)
+    used_by: 03_kpis, 05_savings
+  operating_hours:
+    value:
+      Retail: {open: 9, close: 21, days: [Mon, Tue, Wed, Thu, Fri, Sat, Sun]}
+      Office: {open: 8, close: 18, days: [Mon, Tue, Wed, Thu, Fri]}
+    unit: local clock hours [open, close)
+    label: ASSUMPTION
+    source: BDG2 has no opening hours. Retail default 09:00-21:00 every day (as suggested in the brief); Office 08:00-18:00 Mon-Fri (typical office hours). Not verified for any building
+    used_by: 03_kpis, 04_anomalies, 05_savings
+  operating_hours_overrides:
+    value: {}
+    unit: per-building {open, close, days}
+    label: ASSUMPTION
+    source: "Optional per-building override, e.g. Wolf_retail_Toshia: {open: 10, close: 18, days: [Mon, Tue, Wed, Thu, Fri, Sat]}. Empty = use the type default"
+    used_by: 03_kpis, 04_anomalies, 05_savings
+  degree_day_base_c:
+    value: 18.0
+    unit: deg C
+    label: ASSUMPTION
+    source: Common balance-point convention (US practice uses 65 F = 18.3 C). HDD = max(0, 18 - daily mean temp), CDD = max(0, daily mean temp - 18). Real buildings each have their own balance point
+    used_by: 03_kpis, 04_anomalies
+  emission_factor_t_per_mwh:
+    value: 0.675
+    unit: tCO2/MWh
+    label: ASSUMPTION
+    source: "CEA CO2 Baseline Database for the Indian Power Sector, Version 22.0 (User Guide dated Aug 2026), Table S: all-India weighted average for FY 2025-26 = 0.675 tCO2/MWh. https://cea.nic.in/cdm-co2-baseline-database/ (PDF: https://cea.nic.in/wp-content/uploads/baseline/2026/09/User_Guide__Version_22.0.pdf). DEMONSTRATION ONLY: the BDG2 buildings are in the USA and Ireland, not India"
+    used_by: 03_kpis, 05_savings
+  tariff_inr_per_kwh:
+    value: 8.00
+    unit: INR/kWh
+    label: ASSUMPTION
+    source: "KERC Electricity Tariff (order dated 28 Feb 2024, effective 1 Apr 2024; published by BESCOM as 'Electricity Tariff-2025'), schedule HT-2(b) commercial complexes/offices: energy charge 800 paise/kWh. https://bescom.karnataka.gov.in/storage/pdf-files/RA%20section/ElectricityTariff2025.pdf . Energy charge only: excludes demand charges, taxes and later surcharges/true-ups. ILLUSTRATIVE: the buildings are not billed in INR"
+    used_by: 05_savings
+
+  # ---------------- anomaly detection ----------------
+  baseline_window_obs:
+    value: 15
+    unit: same hour-of-day and day-type observations
+    label: METHOD
+    source: Expected load for an hour = rolling median of the 15 surrounding observations with the same hour-of-day and day-type (about 3 weeks of weekdays, 7 weeks of weekends), so the baseline follows the seasons
+    used_by: 04_anomalies
+  baseline_min_obs:
+    value: 5
+    unit: observations
+    label: METHOD
+    source: Minimum observations in the rolling window before an expected value is produced
+    used_by: 04_anomalies
+  min_scale_frac_of_building_mean:
+    value: 0.10
+    unit: fraction of the building's mean hourly load
+    label: METHOD
+    source: "The MAD scale is floored at 10% of the building's mean load, so a steady or very small load does not turn tiny wiggles into huge z-scores. Calibration: the first run floored at 5% of each hour's expected load and flagged 23.6% of building-days (z up to 113 on a ~1.5 kW night load), too many to review; see reports/mad_sensitivity.csv for the trade-off"
+    used_by: 04_anomalies
+  min_flag_run_hours:
+    value: 2
+    unit: consecutive hours
+    label: METHOD
+    source: Persistence rule common in fault detection - an hour is flagged only if it belongs to a run of at least 2 consecutive hours beyond the threshold, which suppresses one-hour timing blips at opening/closing ramps
+    used_by: 04_anomalies
+  mad_z_threshold:
+    value: 3.5
+    unit: robust z-score
+    label: METHOD
+    source: Iglewicz & Hoaglin (1993) recommend |modified z| > 3.5 as the outlier cut-off for MAD-based scores
+    used_by: 04_anomalies
+  severity_cutoffs_z:
+    value: [3.5, 5.0, 8.0]
+    unit: robust z-score
+    label: METHOD
+    source: "Severity bucket by the day's largest |z|: low 3.5-5, med 5-8, high >= 8. Judgement-based cut-offs"
+    used_by: 04_anomalies
+  dropout_frac_of_expected:
+    value: 0.10
+    unit: fraction of expected load
+    label: METHOD
+    source: A low anomaly reading below 10% of the expected load is tagged meter_dropout_suspect rather than unexpected_low
+    used_by: 04_anomalies
+  if_contamination:
+    value: 0.01
+    unit: fraction of hours
+    label: METHOD
+    source: Isolation Forest flags this share of each building's hours. It is a chosen rate, not an estimate of how many anomalies really exist
+    used_by: 04_anomalies
+  if_n_estimators:
+    value: 200
+    unit: trees
+    label: METHOD
+    source: Enough trees for stable scores on ~8,700 rows per building
+    used_by: 04_anomalies
+  if_severity_cutoffs_pct:
+    value: [99.0, 99.5, 99.9]
+    unit: percentile of building's anomaly score
+    label: METHOD
+    source: "Isolation Forest severity by the score's percentile within the building: low 99-99.5, med 99.5-99.9, high >= 99.9"
+    used_by: 04_anomalies
+  weather_resid_z_threshold:
+    value: 3.5
+    unit: robust z-score of daily residual
+    label: METHOD
+    source: Same Iglewicz & Hoaglin cut-off applied to the residuals of the daily weather regression
+    used_by: 04_anomalies
+
+  # ---------------- savings ----------------
+  baseload_reduction_scenarios:
+    value: [0.05, 0.10, 0.15]
+    unit: fraction of baseload
+    label: ASSUMPTION
+    source: What-if scenario inputs from the brief (5/10/15%), NOT predictions of achievable savings
+    used_by: 05_savings
+  benchmark_from_percentile:
+    value: 75
+    unit: percentile of EUI within peer group
+    label: ASSUMPTION
+    source: Brief section 4.5. Buildings at or above the 75th-percentile EUI of their type are tested against the target
+    used_by: 05_savings
+  benchmark_target_percentile:
+    value: 50
+    unit: percentile of EUI within peer group
+    label: ASSUMPTION
+    source: Brief section 4.5. Target = the peer-group median EUI
+    used_by: 05_savings
+  headline_opportunity:
+    value: after_hours_excess
+    unit: opportunity type
+    label: METHOD
+    source: The opportunity types overlap (cutting baseload also cuts after-hours load), so they must not be added together. The headline uses the after-hours excess because it is the one derived from observed behaviour; it is an UPPER BOUND
+    used_by: 05_savings, 06_export_powerbi
+
+  ranking_baseload_scenario:
+    value: 0.10
+    unit: fraction of baseload
+    label: METHOD
+    source: Only used to RANK the opportunity list - the middle baseload scenario stands in for the three so each building appears once per opportunity type
+    used_by: 05_savings
+
+  # ---------------- export ----------------
+  hourly_export_max_mb:
+    value: 100
+    unit: MB
+    label: METHOD
+    source: Brief section 4.6. fact_hourly_energy.csv is exported only if it stays under about 100 MB
+    used_by: 06_export_powerbi

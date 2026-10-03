@@ -1,0 +1,248 @@
+// =============================================================================
+// measures.dax: every DAX measure for the report, with a plain-English line each.
+//
+// HOW TO USE
+//   1. Home > Enter data > name the table  _Measures  > Load  (an empty table that just holds measures)
+//   2. Select _Measures, then Table tools > New measure, paste ONE measure (from its name to the end),
+//      press Enter. Repeat. Set the format (%, decimals) in Measure tools.
+//   3. Table names = CSV file names. If you renamed a table, rename it here too.
+//
+// PATTERN TAGS (so you can find examples of each DAX idea):
+//   [SUM] [DIVIDE] [CALCULATE] [FILTER-ARG] [VAR] [SUMX] [MAXX] [MEDIANX] [VALUES]
+//   [ALL] [RANKX] [HASONEVALUE] [SELECTEDVALUE] [LOOKUPVALUE] [DATEADD] [DATESINPERIOD]
+//
+// RULE: always DIVIDE(a, b) instead of a / b. DIVIDE returns blank instead of an error when b is 0.
+// =============================================================================
+
+
+// ---------------------------------------------------------------- energy -----
+
+// All electricity in the current filters (measured kWh; excluded gaps are NOT guessed). [SUM]
+Total kWh =
+SUM ( fact_daily_energy[kwh] )
+
+// Floor area of the buildings in the current filters, each building counted once. [SUM]
+Floor Area m2 =
+SUM ( dim_building[floor_area_m2] )
+
+// kWh per m2 for the selected period (e.g. one month). NOT annualised; use EUI (annual) for a year. [DIVIDE]
+Total kWh per m2 =
+DIVIDE ( [Total kWh], [Floor Area m2] )
+
+// Energy Use Intensity, kWh/m2/yr. Uses ANNUALISED kWh (gaps scaled up), so a building with missing
+// hours does not look more efficient. Ignores the date slicer on purpose (it is a whole-year figure). [SUM] [DIVIDE]
+EUI (annual) =
+DIVIDE ( SUM ( fact_annual_kpi[kwh_annualised] ), [Floor Area m2] )
+
+// Average kWh per calendar day in the selection: fair when comparing months of different length. [DIVIDE]
+kWh per Day =
+DIVIDE ( [Total kWh], COUNTROWS ( dim_date ) )
+
+
+// ---------------------------------------------------------------- carbon -----
+
+// Emission factor read from the assumptions table (CEA India, demonstration only). [LOOKUPVALUE]
+// assumptions[value] is text, so VALUE() turns "0.675" into a number.
+CO2 Factor t per MWh =
+VALUE ( LOOKUPVALUE ( assumptions[value], assumptions[key], "emission_factor_t_per_mwh" ) )
+
+// Scope 2 location-based CO2 in tonnes = kWh / 1000 x tCO2 per MWh. [DIVIDE]
+Total CO2 t =
+DIVIDE ( [Total kWh], 1000 ) * [CO2 Factor t per MWh]
+
+// Same, from the annualised kWh (matches RESULTS.md "tCO2/yr"). [SUM]
+Total CO2 t (annualised) =
+SUM ( fact_annual_kpi[co2_tonnes] )
+
+
+// ----------------------------------------------------- load shape (kW) -------
+
+// Baseload: the always-on load. Each building's average daily baseload, ADDED across buildings
+// (an average across all rows would mix big and small buildings). [SUMX] [VALUES] [CALCULATE]
+// CALCULATE inside SUMX = "context transition": it turns the current building row into a filter.
+Avg Baseload kW =
+SUMX (
+    VALUES ( dim_building[building_id] ),
+    CALCULATE ( AVERAGE ( fact_daily_energy[baseload_kw] ) )
+)
+
+// Peak demand: the highest hour of the SUM across selected buildings ("coincident peak").
+// One hourly kWh reading = the average kW during that hour. [MAXX] [VALUES] [CALCULATE]
+Peak kW =
+MAXX (
+    VALUES ( fact_hourly_energy[timestamp] ),
+    CALCULATE ( SUM ( fact_hourly_energy[kwh] ) )
+)
+
+// Average load in kW = total kWh / number of hours in the selection. [DIVIDE]
+Average kW =
+DIVIDE ( SUM ( fact_hourly_energy[kwh] ), DISTINCTCOUNT ( fact_hourly_energy[timestamp] ) )
+
+// Load factor = average load / peak load. Near 1 = flat, always-on; low = peaky. [DIVIDE]
+Load Factor =
+DIVIDE ( [Average kW], [Peak kW] )
+
+// Average kWh in one hour slot (for the hour x weekday heatmap matrix). [DIVIDE]
+Avg kWh per Hour =
+AVERAGE ( fact_hourly_energy[kwh] )
+
+
+// ------------------------------------------------------------ after-hours ----
+
+// Share of ENERGY used outside the ASSUMED opening hours. [DIVIDE] [SUM]
+After-Hours Share % =
+DIVIDE ( SUM ( fact_daily_energy[after_hours_kwh] ), [Total kWh] )
+
+// Share of HOURS that are outside opening hours. A flat load would have Energy share = Time share,
+// so always show the two together. [CALCULATE] [FILTER-ARG] [DIVIDE]
+After-Hours Time Share % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( fact_hourly_energy ), fact_hourly_energy[is_open] = FALSE () ),
+    COUNTROWS ( fact_hourly_energy )
+)
+
+
+// -------------------------------------------------------------- anomalies ----
+
+// Number of anomaly events (one per building, day and method). [COUNTROWS]
+Anomaly Count =
+COUNTROWS ( fact_anomalies )
+
+// Only the high-severity events. "High" = statistically very unusual, NOT necessarily expensive. [CALCULATE] [FILTER-ARG]
+High-Severity Anomaly Count =
+CALCULATE ( [Anomaly Count], fact_anomalies[severity] = "high" )
+
+// Events from one method; copy and change the text for the other methods. [CALCULATE]
+MAD Anomaly Count =
+CALCULATE ( [Anomaly Count], fact_anomalies[method] = "mad_baseline" )
+
+Isolation Forest Anomaly Count =
+CALCULATE ( [Anomaly Count], fact_anomalies[method] = "isolation_forest" )
+
+// Daily kWh shown ONLY on days with an anomaly: plot it as markers on top of the daily kWh line. [IF]
+kWh on Anomaly Days =
+IF ( [Anomaly Count] > 0, [Total kWh] )
+
+// Extra kWh in flagged hours versus the expected baseline (negative = less than expected). [SUM]
+Anomaly Deviation kWh =
+SUM ( fact_anomalies[deviation_kwh] )
+
+
+// -------------------------------------------------------------- savings ------
+
+// Headline estimated savings in kWh. Opportunity types OVERLAP, so only the headline type
+// (after_hours_excess, an UPPER BOUND) is added up here. [CALCULATE] [FILTER-ARG]
+Estimated Savings kWh =
+CALCULATE ( SUM ( fact_opportunities[kwh_saving] ), fact_opportunities[is_headline] = TRUE () )
+
+// Same in INR at the ASSUMED tariff. [CALCULATE]
+Estimated Savings INR =
+CALCULATE ( SUM ( fact_opportunities[inr_saving] ), fact_opportunities[is_headline] = TRUE () )
+
+// Same in tCO2 at the demonstration factor. [CALCULATE]
+Estimated Savings tCO2 =
+CALCULATE ( SUM ( fact_opportunities[co2_saving_t] ), fact_opportunities[is_headline] = TRUE () )
+
+// kWh for whatever opportunity type AND scenario the slicers select. Only meaningful when ONE type
+// and ONE scenario are selected; blank otherwise, so overlapping estimates are never added. [HASONEVALUE]
+Opportunity kWh (selected) =
+IF (
+    HASONEVALUE ( fact_opportunities[opportunity_type] ) && HASONEVALUE ( fact_opportunities[scenario] ),
+    SUM ( fact_opportunities[kwh_saving] )
+)
+
+
+// ------------------------------------------------------- time intelligence ---
+// Needs dim_date marked as the date table and related to the fact tables.
+// The data covers ONE year, so year-over-year is impossible; month-over-month is used instead.
+
+// kWh in the previous month (same filters otherwise). [CALCULATE] [DATEADD]
+kWh Previous Month =
+CALCULATE ( [Total kWh], DATEADD ( dim_date[date], -1, MONTH ) )
+
+// Month-over-month change. Uses kWh PER DAY so February is not "down" just for having fewer days. [VAR] [DATEADD] [DIVIDE]
+kWh per Day MoM % =
+VAR thisMonth = [kWh per Day]
+VAR prevMonth = CALCULATE ( [kWh per Day], DATEADD ( dim_date[date], -1, MONTH ) )
+RETURN
+    DIVIDE ( thisMonth - prevMonth, prevMonth )
+
+// Rolling 30-day total ending on the last date in the current filter (smooths daily noise). [DATESINPERIOD]
+kWh Rolling 30 Days =
+CALCULATE ( [Total kWh], DATESINPERIOD ( dim_date[date], MAX ( dim_date[date] ), -30, DAY ) )
+
+
+// ---------------------------------------------------------- benchmarking -----
+
+// Rank of the building's EUI among buildings of the SAME type; 1 = lowest EUI = best.
+// Blank unless exactly one building is in context (e.g. a table row). [VAR] [SELECTEDVALUE] [RANKX] [ALL] [HASONEVALUE]
+EUI Rank in Type =
+VAR thisType = SELECTEDVALUE ( dim_building[type] )
+RETURN
+    IF (
+        HASONEVALUE ( dim_building[building_id] ),
+        RANKX (
+            CALCULATETABLE ( VALUES ( dim_building[building_id] ), ALL ( dim_building ), dim_building[type] = thisType ),
+            [EUI (annual)],
+            ,
+            ASC,
+            SKIP
+        )
+    )
+
+// Number of buildings in the same type (peer group size). [CALCULATE] [ALL]
+Peers in Type =
+VAR thisType = SELECTEDVALUE ( dim_building[type] )
+RETURN
+    CALCULATE ( DISTINCTCOUNT ( dim_building[building_id] ), ALL ( dim_building ), dim_building[type] = thisType )
+
+// Percentile within type: 0% = best (lowest EUI), 100% = worst. Same formula as fact_annual_kpi. [DIVIDE]
+EUI Percentile in Type =
+IF (
+    HASONEVALUE ( dim_building[building_id] ),
+    DIVIDE ( [EUI Rank in Type] - 1, [Peers in Type] - 1 )
+)
+
+// Median EUI of the building's type: the benchmark line in the EUI bar chart. [MEDIANX] [ALL]
+Peer Median EUI =
+VAR thisType = SELECTEDVALUE ( dim_building[type] )
+RETURN
+    MEDIANX (
+        CALCULATETABLE ( VALUES ( dim_building[building_id] ), ALL ( dim_building ), dim_building[type] = thisType ),
+        [EUI (annual)]
+    )
+
+// How far the building is above (+) or below (-) its type's median EUI. [VAR]
+Gap to Peer Median EUI =
+[EUI (annual)] - [Peer Median EUI]
+
+
+// ----------------------------------------------------------- data quality ----
+
+// Share of hours whose value was interpolated (short gaps only). [CALCULATE] [DIVIDE]
+Filled Hours % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( fact_hourly_energy ), fact_hourly_energy[filled_flag] = TRUE () ),
+    COUNTROWS ( fact_hourly_energy )
+)
+
+// Share of hours with no usable value (long gaps, excluded). [CALCULATE] [DIVIDE]
+Excluded Hours % =
+DIVIDE (
+    CALCULATE ( COUNTROWS ( fact_hourly_energy ), ISBLANK ( fact_hourly_energy[kwh] ) ),
+    COUNTROWS ( fact_hourly_energy )
+)
+
+
+// ------------------------------------------------------------- labels --------
+
+// Honest subtitle for every page: what data, and what is assumed. Put it in a card or in the
+// visual subtitle (Format > Title > Subtitle > fx). [LOOKUPVALUE]
+Report Subtitle =
+"Data: Building Data Genome Project 2 (public dataset, real meter data), "
+    & MIN ( dim_building[year] )
+    & ". INR at an assumed tariff of ₹"
+    & LOOKUPVALUE ( assumptions[value], assumptions[key], "tariff_inr_per_kwh" )
+    & "/kWh and CO2 at the CEA India factor of "
+    & LOOKUPVALUE ( assumptions[value], assumptions[key], "emission_factor_t_per_mwh" )
+    & " tCO2/MWh are for demonstration only: the buildings are in the USA and Ireland."

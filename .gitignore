@@ -1,0 +1,11 @@
+# raw downloads are large (~194 MB) and re-created by `make data` (src/01_download.py)
+data/raw/
+# intermediate files are re-created by the pipeline
+data/interim/
+# data/processed/ is kept on purpose: Power BI can be built without running Python
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# local assistant/editor settings (never publish)
+.claude/

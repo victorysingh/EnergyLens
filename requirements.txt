@@ -1,0 +1,14 @@
+# Tested with Python 3.13 (Anaconda) on Windows 11, October 2026:
+# pandas 3.0.2, numpy 2.4.4, scikit-learn 1.8.0, matplotlib 3.10.9, pyarrow 21.0.0,
+# PyYAML 6.0.3, requests 2.34.2, pytest 8.4.2, nbconvert 7.16.6, ipykernel 6.31.0
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.4
+matplotlib>=3.8
+pyarrow>=15
+PyYAML>=6.0
+requests>=2.31
+pytest>=8.0
+# only for `make notebook`
+nbconvert>=7.0
+ipykernel>=6.0
